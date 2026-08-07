@@ -1,0 +1,26 @@
+# ⚠️ SECRETOS — JAMÁS subir a GitHub
+.env
+*.key
+*.pem
+secrets*
+
+# Datos operativos de cada despliegue (privados de cada socio)
+trades.csv
+positions.json
+events.json
+*.log
+rockefeller.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Sistema
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
