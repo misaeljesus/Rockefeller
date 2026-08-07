@@ -41,6 +41,7 @@ class Position:
     initial_stop: float = 0.0    # fijo al abrir — NUNCA se toca (a diferencia de .stop)
     qty_opened: float = 0.0      # qty TOTAL al abrir — fijo, para reportar el trade completo
     realized_quote: float = 0.0  # PnL ya embolsado en ventas parciales (TP1)
+    close_attempts: int = 0      # intentos de cierre fallidos (v1.4)
 
     def __post_init__(self):
         if not self.initial_stop:
@@ -101,6 +102,50 @@ class Executor:
         except (OSError, json.JSONDecodeError, TypeError) as e:
             log.error("positions.json corrupto (%s) — revisa tu Spot manualmente", e)
 
+    # ─────────────── reconciliación con el exchange (v1.4) ───────────────
+    def reconcile(self) -> None:
+        """Compara lo que el bot cree tener contra lo que el exchange dice.
+
+        Detecta los dos fallos silenciosos que nos costaron caro:
+          · cripto huérfana (el bot cerró la posición pero la venta falló),
+          · fondos absorbidos por Binance Earn (suscripción automática) o
+            bloqueados en otra orden, que hacen imposible vender.
+        Solo INFORMA — nunca vende por su cuenta: esa decisión es del humano.
+        """
+        if self.paper:
+            return
+        try:
+            prices = {t["symbol"]: float(t["price"])
+                      for t in self.client.get_symbol_ticker()}
+            balances = self.client.get_account()["balances"]
+        except Exception as e:
+            log.warning("Reconciliación omitida (%s)", e)
+            return
+
+        quote = self.s.run.quote_asset
+        tracked = {self.data.base_asset(s) for s in self.positions}
+        for b in balances:
+            asset, free, locked = b["asset"], float(b["free"]), float(b["locked"])
+            total = free + locked
+            if total <= 0 or asset == quote:
+                continue
+            value = total * prices.get(asset + quote, 0.0)
+            if value < 1.0:            # polvo irrelevante
+                continue
+            if asset in tracked:
+                pos = self.positions[asset + quote]
+                if free + 1e-12 < pos.qty * 0.99:
+                    log.critical("RECONCILIACIÓN %s: el bot cree tener %.8f pero solo "
+                                 "hay %.8f libres (%.8f bloqueados). ¿Suscripción "
+                                 "automática de Binance Earn activa? Con los fondos "
+                                 "fuera de Spot el stop NO puede ejecutarse.",
+                                 asset, pos.qty, free, locked)
+            else:
+                log.critical("RECONCILIACIÓN: %.8f %s (~%.2f %s) en la cuenta SIN "
+                             "posición asociada. Si el bot lo compró, quedó huérfano "
+                             "y NO tiene stop. Revísalo y véndelo manualmente si no "
+                             "es tuyo de antes.", total, asset, value, quote)
+
     # ─────────────────── equity y exposición ───────────────────
     def equity(self) -> float:
         if self.paper:
@@ -145,13 +190,24 @@ class Executor:
         else:
             try:
                 order = self.client.order_limit_buy(
-                    symbol=symbol, quantity=qty,
-                    price=f"{self.data.round_price(symbol, entry):.8f}".rstrip("0").rstrip("."),
+                    symbol=symbol,
+                    quantity=self.data.qty_to_str(symbol, qty),
+                    price=self.data.price_to_str(symbol, entry),
                 )
                 # espera breve de fill; si no llena, cancela (no perseguimos)
                 fill = self._await_fill(symbol, order["orderId"], timeout=90)
                 if fill is None:
                     return None
+                # v1.4: la cantidad que registramos es la REALMENTE ejecutada,
+                # descontando la comisión si Binance la cobró en el activo base
+                # (pasa cuando no hay BNB para pagar fees).
+                try:
+                    o = self.client.get_order(symbol=symbol, orderId=order["orderId"])
+                    executed = float(o.get("executedQty", qty))
+                    if executed > 0:
+                        qty = self.data.round_qty(symbol, executed)
+                except Exception:
+                    pass
             except BinanceAPIException as e:
                 log.error("%s: error al abrir — %s", symbol, e)
                 return None
@@ -196,16 +252,21 @@ class Executor:
             # 2) TP1: +1R → vende fracción, stop a breakeven
             if not p.tp1_done and price >= p.entry + ex.tp1_r_multiple * p.initial_risk_per_unit:
                 sell_qty = self.data.round_qty(symbol, p.qty * ex.tp1_fraction)
-                if sell_qty > 0:
-                    self._sell(symbol, sell_qty, price)
-                    realized = (price - p.entry) * sell_qty
-                    self._book(p, realized, partial=True)
-                    p.realized_quote += realized   # se suma al PnL total del trade
-                    p.qty -= sell_qty
+                sold = self._sell(symbol, sell_qty, price) if sell_qty > 0 else 0.0
+                if sold <= 0:
+                    # v1.4 — si la venta no se ejecutó, NO se marca TP1 ni se
+                    # reduce la cantidad: se reintentará el próximo ciclo.
+                    log.warning("%s: TP1 no ejecutado (venta fallida). Se reintenta.",
+                                symbol)
+                    continue
+                realized = (price - p.entry) * sold
+                self._book(p, realized, partial=True)
+                p.realized_quote += realized   # se suma al PnL total del trade
+                p.qty -= sold
                 p.tp1_done = True
                 p.stop = p.entry * (1 + ex.breakeven_buffer_pct / 100)
                 log.info("%s: TP1 (+1R, +%.4f USDT). Stop a breakeven, resto corre.",
-                         symbol, realized if sell_qty > 0 else 0.0)
+                         symbol, realized)
                 continue
 
             # 3) trailing tras TP1
@@ -226,13 +287,41 @@ class Executor:
         if self.positions:
             self._save_state()   # persistir cambios de stop/qty (TP1, trailing)
 
-    def _sell(self, symbol: str, qty: float, ref_price: float) -> None:
+    def _sell(self, symbol: str, qty: float, ref_price: float) -> float:
+        """Vende y devuelve la cantidad REALMENTE vendida (0.0 si falló).
+
+        v1.4 — antes esto devolvía None y el error se tragaba en silencio:
+        la posición se marcaba como cerrada aunque la cripto siguiera en la
+        cuenta. Ahora:
+          · la cantidad se recorta al saldo REALMENTE libre (evita -2010),
+          · se envía como string exacto vía Decimal (evita -1111),
+          · si falla, se devuelve 0.0 y el llamador NO cierra la posición.
+        """
         if self.paper:
-            return
-        try:
-            self.client.order_market_sell(symbol=symbol, quantity=qty)
-        except BinanceAPIException as e:
-            log.error("%s: error al vender — %s", symbol, e)
+            return qty
+
+        base = self.data.base_asset(symbol)
+        for intento in (1, 2, 3):
+            free = self.data.free_balance(base)
+            sell_qty = self.data.round_qty(symbol, min(qty, free))
+            if sell_qty <= 0:
+                log.error("%s: saldo libre insuficiente (%.8f %s disponible, "
+                          "se querían vender %.8f). ¿Fondos en Earn o en otra "
+                          "orden? La posición NO se cierra.", symbol, free, base, qty)
+                return 0.0
+            try:
+                self.client.order_market_sell(
+                    symbol=symbol, quantity=self.data.qty_to_str(symbol, sell_qty))
+                if sell_qty < qty * 0.999:
+                    log.warning("%s: vendidas %.8f de %.8f solicitadas (saldo real)",
+                                symbol, sell_qty, qty)
+                return sell_qty
+            except BinanceAPIException as e:
+                log.error("%s: error al vender (intento %d/3) — %s", symbol, intento, e)
+                time.sleep(2)
+        log.critical("%s: VENTA FALLIDA tras 3 intentos. La posición sigue ABIERTA "
+                     "y se reintentará en el próximo ciclo. Revisa la cuenta.", symbol)
+        return 0.0
 
     def _book(self, p: Position, realized_quote: float, partial: bool) -> None:
         if self.paper:
@@ -240,8 +329,28 @@ class Executor:
 
     def _close(self, p: Position, price: float, reason: str, risk_manager) -> None:
         qty = self.data.round_qty(p.symbol, p.qty)
-        if qty > 0:
-            self._sell(p.symbol, qty, price)
+        sold = self._sell(p.symbol, qty, price) if qty > 0 else 0.0
+
+        # v1.4 — LA REGLA DE ORO: si el exchange no confirmó la venta, la
+        # posición NO se cierra. Nada de contabilidad ficticia.
+        if qty > 0 and sold <= 0:
+            p.close_attempts = getattr(p, "close_attempts", 0) + 1
+            log.critical("%s: cierre [%s] ABORTADO — la venta no se ejecutó "
+                         "(intento %d). Posición sigue viva y vigilada.",
+                         p.symbol, reason, p.close_attempts)
+            self._save_state()
+            return
+
+        if 0 < sold < qty * 0.999:      # venta parcial: queda remanente vivo
+            realized_partial = (price - p.entry) * sold
+            self._book(p, realized_partial, partial=True)
+            p.realized_quote += realized_partial
+            p.qty -= sold
+            log.warning("%s: venta PARCIAL (%.8f de %.8f). Queda posición abierta.",
+                        p.symbol, sold, qty)
+            self._save_state()
+            return
+
         final_leg = (price - p.entry) * p.qty
         self._book(p, final_leg, partial=False)
         total_realized = p.realized_quote + final_leg   # TP1 parcial + tramo final

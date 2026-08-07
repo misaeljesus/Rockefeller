@@ -1,7 +1,7 @@
 # ROCKEFELLER 🏛️
 ### Bot de trading spot cuantitativo para Binance — VWAP · Chartismo · Order Flow
 
-**v1.3.2** · Python · Binance Spot · solo largos · top-40 USDT
+**v1.4.0** · Python · Binance Spot · solo largos · top-40 USDT
 
 Rockefeller opera con la disciplina de un desk institucional: pocas operaciones,
 alta selectividad, riesgo definido antes de entrar y control anti-avaricia
@@ -17,7 +17,7 @@ libros de inversión, y conceptos de order flow (CVD, bid-ask depth imbalance).
 
 ## ⚠️ ANTES DE NADA — Seguridad
 
-**NUNCA subir el archivo `.env` a GitHub.** Contiene tus claves API de Binance.
+**NUNCA subas el archivo `.env` a GitHub.** Contiene tus claves API de Binance.
 El `.gitignore` de este repo ya lo excluye, pero verifícalo con `git status`
 antes de cada commit.
 
@@ -160,8 +160,31 @@ selectividad funcionando, no un fallo. Y 45 operaciones de backtest es evidencia
 prometedora, no prueba definitiva: el veredicto real lo dan las primeras 30-40
 operaciones en vivo, y si el win-rate converge hacia el del backtest.
 
+## Operación en vivo — requisitos que NO son opcionales
+
+1. **Mantén saldo de BNB en Spot (3-5 USDT) y activa "Pagar comisiones con BNB".**
+   Sin BNB, Binance cobra la comisión *en el activo comprado*: compras 60.7 ADA
+   y recibes 60.64 — al intentar vender los 60.7 el exchange responde
+   `-2010 insufficient balance` y la venta falla.
+2. **Desactiva la suscripción automática de Binance Earn (Simple Earn → Auto-Subscribe).**
+   Si Earn absorbe el token recién comprado, sale de Spot y **el stop-loss no
+   puede ejecutarse**: la posición queda sin protección real.
+3. **Revisa el log buscando `RECONCILIACIÓN`** en tu rutina semanal. El bot avisa
+   ahí de cualquier cripto huérfana o de fondos fuera de Spot.
+
+```bash
+grep -iE "RECONCILIACIÓN|VENTA FALLIDA|ABORTADO" rockefeller.log
+```
+
 ## Changelog
 
+- **1.4.0** — **Integridad de ejecución.** Redondeos con `Decimal` (adiós `-1111
+  too much precision`); la cantidad a vender se recorta al saldo *realmente libre*
+  (adiós `-2010 insufficient balance`); **una venta fallida ya nunca cierra la
+  posición** ni registra un trade fantasma — se reintenta y la posición sigue
+  vigilada; ventas parciales dejan el remanente vivo con su stop; la qty registrada
+  al abrir es la *realmente ejecutada*; reconciliación con el exchange al arrancar
+  y cada hora (detecta cripto huérfana y fondos secuestrados por Earn).
 - **1.3.2** — PnL total del trade (TP1 + tramo final) en `trades.csv` y en el lockout diario
 - **1.3.1** — Fix: múltiplo R corrupto cuando el trailing cruza la entrada (`initial_stop` fijo)
 - **1.3.0** — Radar de ballenas por REST bajo demanda; eliminados los websockets (fugas de memoria → OOM kills)

@@ -10,7 +10,7 @@ Motor de datos — Binance Spot (REST + WebSockets vía python-binance).
 from __future__ import annotations
 
 import logging
-import math
+from decimal import Decimal, ROUND_DOWN
 import time
 
 import pandas as pd
@@ -86,17 +86,50 @@ class DataEngine:
                     "min_notional": float(f.get("NOTIONAL", f.get("MIN_NOTIONAL", {"minNotional": 10})).get("minNotional", 10)),
                 }
 
-    # ─────────────────── redondeos de exchange ───────────────────
+    # ─────────────────── redondeos de exchange (Decimal, exacto) ───────────────────
+    # v1.4: la aritmética float producía 32.300000000000004 y Binance lo
+    # rechazaba con -1111 "too much precision". Decimal lo resuelve de raíz.
+    def _step(self, symbol: str) -> Decimal:
+        return Decimal(str(self._filters.get(symbol, {}).get("step", 1e-6)))
+
     def round_qty(self, symbol: str, qty: float) -> float:
-        step = self._filters.get(symbol, {}).get("step", 1e-6)
-        return math.floor(qty / step) * step
+        step = self._step(symbol)
+        d = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        return float(d)
+
+    def qty_to_str(self, symbol: str, qty: float) -> str:
+        """Cantidad EXACTA para la API: sin flotantes sucios ni notación científica."""
+        step = self._step(symbol)
+        d = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        decimals = max(0, -step.normalize().as_tuple().exponent)
+        return f"{d:.{decimals}f}"
 
     def round_price(self, symbol: str, price: float) -> float:
-        tick = self._filters.get(symbol, {}).get("tick", 1e-6)
-        return math.floor(price / tick) * tick
+        tick = Decimal(str(self._filters.get(symbol, {}).get("tick", 1e-6)))
+        d = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+        return float(d)
+
+    def price_to_str(self, symbol: str, price: float) -> str:
+        tick = Decimal(str(self._filters.get(symbol, {}).get("tick", 1e-6)))
+        d = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+        decimals = max(0, -tick.normalize().as_tuple().exponent)
+        return f"{d:.{decimals}f}"
 
     def min_notional(self, symbol: str) -> float:
         return self._filters.get(symbol, {}).get("min_notional", 10.0)
+
+    def base_asset(self, symbol: str) -> str:
+        return symbol[: -len(self.s.run.quote_asset)]
+
+    def free_balance(self, asset: str) -> float:
+        """Saldo REALMENTE disponible en Spot (excluye lo bloqueado en órdenes
+        y lo que Binance Earn se haya llevado por suscripción automática)."""
+        try:
+            b = self.client.get_asset_balance(asset=asset)
+            return float(b["free"]) if b else 0.0
+        except Exception as e:
+            log.warning("No se pudo leer el saldo de %s (%s)", asset, e)
+            return 0.0
 
     # ─────────────────── velas ───────────────────
     def klines(self, symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:

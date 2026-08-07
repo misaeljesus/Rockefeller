@@ -66,6 +66,8 @@ class Rockefeller:
     def run(self) -> None:
         log.info("Rockefeller iniciado en modo %s", self.s.run.mode.upper())
         self.data.refresh_universe(force=True)
+        self.executor.reconcile()      # v1.4: auditoría de arranque vs exchange
+        self._last_reconcile = time.time()
 
         while True:
             try:
@@ -81,6 +83,11 @@ class Rockefeller:
     def _cycle(self) -> None:
         # 1) gestionar lo abierto SIEMPRE primero (defensa antes que ataque)
         self.executor.manage(self.risk)
+
+        # 1b) reconciliación horaria con el exchange (v1.4)
+        if time.time() - getattr(self, "_last_reconcile", 0) > 3600:
+            self.executor.reconcile()
+            self._last_reconcile = time.time()
 
         equity = self.executor.equity()
         self.risk.update_equity_peak(equity)
