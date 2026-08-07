@@ -17,7 +17,7 @@ libros de inversión, y conceptos de order flow (CVD, bid-ask depth imbalance).
 
 ## ⚠️ ANTES DE NADA — Seguridad
 
-**NUNCA subas el archivo `.env` a GitHub.** Contiene tus claves API de Binance.
+**NUNCA subir el archivo `.env` a GitHub.** Contiene tus claves API de Binance.
 El `.gitignore` de este repo ya lo excluye, pero verifícalo con `git status`
 antes de cada commit.
 
