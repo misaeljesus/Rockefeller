@@ -5,7 +5,14 @@ Filosofía (Larry Williams / síntesis de 150+ libros):
   1) Preservar capital.  2) Retornos consistentes.  3) Retornos excepcionales.
   Nunca invertir ese orden.
 """
+import os
 from dataclasses import dataclass, field
+
+try:                      # el .env debe leerse ANTES de definir los dataclass
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
 
 
 # ──────────────────────────────────────────────────────────────
@@ -13,17 +20,24 @@ from dataclasses import dataclass, field
 # ──────────────────────────────────────────────────────────────
 @dataclass
 class RunConfig:
-    mode: str = "paper"          # "paper" | "testnet" | "live"
+    # v1.4.1: mode y capital se leen del .env (que NUNCA se versiona), así un
+    # `git pull` jamás vuelve a revertir el bot a paper en producción.
+    #   .env →  ROCKEFELLER_MODE=live
+    #           ROCKEFELLER_CAPITAL_USDT=20
+    mode: str = os.getenv("ROCKEFELLER_MODE", "paper")   # "paper"|"testnet"|"live"
     quote_asset: str = "USDT"
     loop_interval_sec: int = 60       # ciclo de decisión (1h no exige más)
     universe_refresh_min: int = 60    # refresco del top-40
     log_level: str = "INFO"
     # ── CAPITAL QUE EL BOT PUEDE USAR ──
-    # Paper: saldo simulado inicial. Live/testnet: TOPE de seguridad —
-    # aunque tengas más USDT en tu wallet Spot, el bot nunca calculará
-    # tamaños de posición sobre más que este número. Para cambiarlo:
-    # edita este valor y reinicia el bot (Ctrl+C y volver a lanzar).
-    starting_capital_usdt: float = 20.0
+    # Paper: saldo simulado inicial. Live/testnet: TOPE de seguridad — aunque
+    # tengas más USDT en Spot, el bot nunca dimensiona sobre más que esto.
+    starting_capital_usdt: float = float(os.getenv("ROCKEFELLER_CAPITAL_USDT", "20"))
+    # Reserva de BNB para comisiones: hasta este valor en USD no se reporta
+    # como posición huérfana en la reconciliación (es combustible, no un trade).
+    fee_asset_reserve_usdt: float = 15.0
+    # Reserva de BNB para comisiones que la reconciliación debe ignorar
+    bnb_fee_reserve_usdt: float = 15.0
 
 
 # ──────────────────────────────────────────────────────────────

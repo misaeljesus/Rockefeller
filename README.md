@@ -1,7 +1,7 @@
 # ROCKEFELLER 🏛️
 ### Bot de trading spot cuantitativo para Binance — VWAP · Chartismo · Order Flow
 
-**v1.4.0** · Python · Binance Spot · solo largos · top-40 USDT
+**v1.4.1** · Python · Binance Spot · solo largos · top-40 USDT
 
 Rockefeller opera con la disciplina de un desk institucional: pocas operaciones,
 alta selectividad, riesgo definido antes de entrar y control anti-avaricia
@@ -98,7 +98,7 @@ resto con trailing 2×ATR hasta TP2 (+2.2R). Time-stop 72h.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env        # añade tus claves (sin retiros, IP restringida)
+cp .env.example .env        # claves + ROCKEFELLER_MODE + ROCKEFELLER_CAPITAL_USDT
 
 # 1) Backtest — si el profit factor < 1.3 tras costes, NO desplegar
 python3 backtest.py BTCUSDT ETHUSDT SOLUSDT BNBUSDT --days 120
@@ -178,6 +178,9 @@ grep -iE "RECONCILIACIÓN|VENTA FALLIDA|ABORTADO" rockefeller.log
 
 ## Changelog
 
+- **1.4.1** — `mode` y capital se leen del `.env` (un `git pull` ya no revierte
+  producción a `paper`); la reserva de BNB para comisiones deja de reportarse
+  como posición huérfana.
 - **1.4.0** — **Integridad de ejecución.** Redondeos con `Decimal` (adiós `-1111
   too much precision`); la cantidad a vender se recorta al saldo *realmente libre*
   (adiós `-2010 insufficient balance`); **una venta fallida ya nunca cierra la
