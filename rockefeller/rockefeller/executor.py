@@ -124,6 +124,9 @@ class Executor:
 
         quote = self.s.run.quote_asset
         tracked = {self.data.base_asset(s) for s in self.positions}
+        # BNB de reserva para comisiones: no es una posición huérfana. Solo se
+        # ignora si es pequeño y no hay una posición abierta en BNB.
+        fee_reserve = self.s.run.fee_asset_reserve_usdt
         for b in balances:
             asset, free, locked = b["asset"], float(b["free"]), float(b["locked"])
             total = free + locked
@@ -131,6 +134,14 @@ class Executor:
                 continue
             value = total * prices.get(asset + quote, 0.0)
             if value < 1.0:            # polvo irrelevante
+                continue
+            if asset == "BNB" and asset not in tracked and value <= fee_reserve:
+                log.info("Reserva de comisiones: %.8f BNB (~%.2f %s) — OK",
+                         total, value, quote)
+                continue
+            # reserva de BNB para comisiones: no es una posición huérfana
+            if (asset == "BNB" and asset not in tracked
+                    and value <= self.s.run.bnb_fee_reserve_usdt):
                 continue
             if asset in tracked:
                 pos = self.positions[asset + quote]
